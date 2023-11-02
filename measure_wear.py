@@ -1,124 +1,105 @@
-#importando as libs que eu preciso
-import pyrealsense2 as rs
 import numpy as np
 import cv2
+import pyrealsense2 as rs
+import matplotlib.pyplot as plt
+from mpl_toolkits.mplot3d import Axes3D
 import time
-from PIL import Image as im
-from numpy import asarray
-import sys
-np.set_printoptions(threshold=sys.maxsize)
 
-import pickle
-
-#função pra pegar a disntância entre a câmera realsense e o objeto de interesse
-def get_distance_array(depth_frame):
-    mask1 = pickle.load(open('D:/estudos/mestrado/code_msc/realsense/masks5.sav','rb'))
-    seconds = time.time()
-    depth_image = np.asanyarray(depth_frame.get_data())
-    depth = np.zeros( (depth_image.shape[0], depth_image.shape[1]))
-    depth255 = np.zeros( (depth_image.shape[0], depth_image.shape[1]))
-    x = tuple(range(0, depth_image.shape[1], 1))
-    y = tuple(range(0, depth_image.shape[0], 1))
-    for i in range(len(y)):
-        for j in range(len(x)):
-            if mask1 [0][i][j] > 0:
-                depth[i, j] = depth_frame.get_distance(j, i)
-                if(depth[i, j] > 2):
-                    depth[i, j] = 2
-                if(depth[i, j] < 0):
-                    depth[i, j] = 0
-                depth[i, j] = (((depth[i, j]))*255)
-            else:
-                depth[i, j] = -1
-            
-                
-    seconds = time.time()- seconds
-    return (depth, seconds)
-
-# Configure depth and color streams
+# Inicializar a câmera e o pipeline
 pipeline = rs.pipeline()
 config = rs.config()
+config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+pipeline.start(config)
+# Adicionando o filtro de decimação
+decimation = rs.decimation_filter()
 
-# Get device product line for setting a supporting resolution
-pipeline_wrapper = rs.pipeline_wrapper(pipeline)
-pipeline_profile = config.resolve(pipeline_wrapper)
-device = pipeline_profile.get_device()
-device_product_line = str(device.get_info(rs.camera_info.product_line))
+# Obter quadros da câmera
+frames = pipeline.wait_for_frames()
+time.sleep(5)  # pausa para dar tempo do sensor pegar todos os pontos
+depth_frame = frames.get_depth_frame()
 
-config.enable_stream(rs.stream.depth, 848, 480, rs.format.z16, 15)
-#config.enable_stream(rs.stream.color, 640, 360, rs.format.bgr8, 15)
-config.enable_stream(rs.stream.infrared, 1, 848, 480, rs.format.y8, 15)
+# Aplicar o filtro de decimação
+depth_frame = decimation.process(depth_frame)
 
-# Start streaming
-profile = pipeline.start(config)
-#Set distance configs
-sensor_dep = profile.get_device().query_sensors()[0]
-sensor_dep.set_option(rs.option.laser_power, 20)
+# Carregar a máscara
+mask = cv2.imread('D:/estudos/mestrado/3codigo_MSC/measurement_wear/codes/images/bloco_azul_otsu.png', cv2.IMREAD_GRAYSCALE)
+# Redimensionar a máscara para corresponder à resolução do quadro de profundidade após decimação
+depth_image_temp = np.asanyarray(depth_frame.get_data())
+#mask = cv2.resize(mask, (depth_image_temp.shape[1], depth_image_temp.shape[0]), interpolation = cv2.INTER_NEAREST)
+cv2.imshow('mask', mask)
+cv2.waitKey(0) 
 
-colorizer = rs.colorizer()
 
-colorizer.set_option(rs.option.min_distance, 0.4)
-print("min_distance = %d" % colorizer.get_option(rs.option.min_distance) )
-colorizer.set_option(rs.option.max_distance, 1.1)
-print("max_distance = %d" % colorizer.get_option(rs.option.max_distance) )
+# Obter imagem de profundidade
+depth_image = np.asanyarray(depth_frame.get_data())
+cv2.imwrite('teste.png', depth_image)
+depth_image_opencv = cv2.imread('teste.png', cv2.IMREAD_GRAYSCALE)
+depth_image_opencv = cv2.resize(depth_image_opencv, (640,480),  interpolation = cv2.INTER_NEAREST)
+print("depth_image "  + str(depth_image.shape))
+print('depth_image_opencv ' + str(depth_image_opencv.shape))
+cv2.imshow('depth_image_opencv',depth_image_opencv )
+depth_image_smoothed = cv2.GaussianBlur(depth_image_opencv, (5, 5), 0)
+cv2.imshow('depth_image_smoothed', depth_image_smoothed)
+cv2.waitKey(0) 
 
-try:
-    ok_flag = True
-    while ok_flag==True:
+# Mascarar a imagem de profundidade
+masked_depth = np.where((mask > 0.5) & (depth_image_smoothed <= 355), depth_image_smoothed, 0)  
 
-        # Wait for a coherent pair of frames: depth and color
-        frames = pipeline.wait_for_frames()
-        depth_frame = frames.get_depth_frame() 
-        #color_frame = frames.get_color_frame()
-        infra1_frame = frames.get_infrared_frame(1)
-        
-        #Calcule distance array from camera
-        array_distance, tempo = get_distance_array(depth_frame)
-        for distance in array_distance:
-            print(distance)
-        
-        print("Tempo processamento frame: ", tempo)
-        image_distance = im.fromarray(array_distance)
-        image_distance = image_distance.convert("RGB")
+Y, X = np.meshgrid(np.linspace(0, 1, masked_depth.shape[1]), np.linspace(0, 1, masked_depth.shape[0]))
 
-        #Colorizer
-        depth_frame = colorizer.colorize(depth_frame)
+# Extraia os pontos válidos da imagem de profundidade e da máscara
+valid_points = masked_depth[mask > 0]
+valid_Y = Y[mask > 0]
+valid_X = X[mask > 0]
+
+# Visualizando a nuvem de pontos
+fig = plt.figure(figsize=(10, 7))
+ax = fig.add_subplot(111, projection='3d')
+ax.scatter(valid_X, valid_Y, valid_points, c=valid_points, cmap='viridis', s=2)
+ax.set_xlabel('X')
+ax.set_ylabel('Y')
+ax.set_zlabel('Depth (mm)')
+ax.set_title('Nuvem de pontos 3D da câmera de profundidade RealSense')
+plt.show()
+
+pipeline.stop()
+cv2.destroyAllWindows() 
+# Função para gerar relatório
+def generate_report(mask, masked_depth):
+    fig, axs = plt.subplots(2, 1, figsize=(10, 12))
     
-        # Convert images to numpy arrays
-        depth_image = np.asanyarray(depth_frame.get_data())
-        
-        # Convert depth_color_image [R,G,B, 3 channel] to depth_gray_image [1 channel]
-        depth_gray_image = cv2.cvtColor(depth_image, cv2.COLOR_RGB2GRAY)
-
-        infrared_image = np.asanyarray(infra1_frame.get_data())
-        #infrared_image = im.fromarray(infrared_image)
-        
-        infrared_depth = np.dstack([infrared_image, infrared_image, depth_gray_image]).astype(np.uint8)
-        infrared_depth = im.fromarray(infrared_depth)
-        
-        depth_gray_image = im.fromarray(depth_gray_image)
-        infrared_image = im.fromarray(infrared_image)
-        infrared_depth = infrared_depth.convert("RGB")
-        infrared_image = infrared_image.convert("RGB")
-        depth_gray_imageRGB = depth_gray_image.convert("RGB")
-        
-        # Apply colormap on depth image (image must be converted to 8-bit per pixel first)
-        depth_colormap = cv2.applyColorMap(cv2.convertScaleAbs(depth_image, alpha=1), cv2.COLORMAP_JET)
-        
-        images = np.vstack((np.hstack((infrared_depth, image_distance)), 
-                           (np.hstack((infrared_image, depth_gray_imageRGB)))))
-
-        # Show images
-        cv2.namedWindow('RealSense', cv2.WINDOW_AUTOSIZE)
-        cv2.imshow('RealSense', images)
+    valid_distances = masked_depth[mask > 0.5]
+    mean_distance = 325  # Distância da superfície do objeto à câmera
+    std_distance = np.std(valid_distances)
+    threshold = mean_distance + 1
+    anomaly_mask = np.zeros_like(masked_depth)
+    anomaly_mask[masked_depth > threshold] = 1
     
-        
-        if cv2.waitKey(1) == 27:
-            ok_flag = False
-            
-    cv2.destroyAllWindows()
-    save_ply(frames)
-finally:
+    axs[0].imshow(mask, cmap='gray')
+    axs[0].imshow(anomaly_mask, cmap='Reds', alpha=0.6)
+    axs[0].set_title('Máscara Binária com Desníveis em Destaque')
+    axs[0].axis('off')
+    
+    axs[1].hist(valid_distances, bins=50, color='blue', edgecolor='black')
+    axs[1].axvline(threshold, color='red', linestyle='dashed', linewidth=2, label='Threshold de Desníveis')
+    axs[1].set_title('Distribuição de distâncias medidas')
+    axs[1].set_xlabel('Distância (mm)')
+    axs[1].set_ylabel('Frequency')
+    axs[1].legend()
+    
+    min_distance = np.min(valid_distances)
+    max_distance = np.max(valid_distances)
+    
+    stats_text = f"""
+    Distância Mínima: {min_distance} mm
+    Distância Máxima: {max_distance} mm
+    Distância Média: {mean_distance:.2f} mm
+    Desvio padrão: {std_distance:.2f} mm
+    """
+    
+    plt.figtext(0.65, 0.3, stats_text, fontsize=10, ha='left')
+    plt.tight_layout()
+    plt.show()
 
-    # Stop streaming
-    pipeline.stop()
+# Gerando o relatório no final
+generate_report(mask, masked_depth)
