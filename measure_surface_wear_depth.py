@@ -4,53 +4,66 @@ import pyrealsense2 as rs
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 import time
+from skimage.filters import threshold_otsu
+from scipy import ndimage
 
 # Inicializar a câmera e o pipeline
 pipeline = rs.pipeline()
 config = rs.config()
 config.enable_stream(rs.stream.depth, 640, 480, rs.format.z16, 30)
+config.enable_stream(rs.stream.color, 640, 480, rs.format.rgb8, 30)
 pipeline.start(config)
+time.sleep(5)  # pausa para dar tempo do sensor pegar todos os pontos
 # Adicionando o filtro de decimação
-decimation = rs.decimation_filter()
+# decimation = rs.decimation_filter()
+hole_filling = rs.hole_filling_filter()
+# spatial_filter = rs.spatial_filter()
+# temporal_filter = rs.temporal_filter()
+
+
+# Alinhamento dos frames de cor e profundidade
+align_to = rs.stream.color
+align = rs.align(align_to)
 
 # Obter quadros da câmera
 frames = pipeline.wait_for_frames()
-time.sleep(5)  # pausa para dar tempo do sensor pegar todos os pontos
+frames = align.process(frames)
 depth_frame = frames.get_depth_frame()
+color_frame = frames.get_color_frame()
 
-# Aplicar o filtro de decimação
-depth_frame = decimation.process(depth_frame)
+img = np.asanyarray(color_frame.get_data())
+img_gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+thresh = threshold_otsu(img_gray)
+img_otsu  = img_gray < thresh
+
+# cv2.imwrite('bloco4.png', img_otsu.astype(np.uint8) * 255) #descomente esta linha para realizar a segmentação do objeto e depois comente novamente para não criar de novo
+
+# Aplicar o filtros
+# depth_frame = spatial_filter.process(depth_frame)
+# depth_frame = temporal_filter.process(depth_frame)
+depth_frame = hole_filling.process(depth_frame)
 
 # Carregar a máscara
-mask = cv2.imread('D:/estudos/mestrado/3codigo_MSC/measurement_wear/codes/images/bloco_azul_otsu.png', cv2.IMREAD_GRAYSCALE)
-# Redimensionar a máscara para corresponder à resolução do quadro de profundidade após decimação
-depth_image_temp = np.asanyarray(depth_frame.get_data())
-#mask = cv2.resize(mask, (depth_image_temp.shape[1], depth_image_temp.shape[0]), interpolation = cv2.INTER_NEAREST)
-cv2.imshow('mask', mask)
-cv2.waitKey(0) 
-
+mask = cv2.imread('bloco4.png', cv2.IMREAD_GRAYSCALE)# Redimensionar a máscara para corresponder à resolução do quadro de profundidade após decimação
+# depth_image_temp = np.asanyarray(depth_frame.get_data())
+# mask = cv2.resize(mask, (depth_image_temp.shape[1], depth_image_temp.shape[0]))
+mask = ndimage.binary_erosion(mask, structure=np.ones((35, 35))).astype(mask.dtype)
 
 # Obter imagem de profundidade
+
 depth_image = np.asanyarray(depth_frame.get_data())
-cv2.imwrite('teste.png', depth_image)
-depth_image_opencv = cv2.imread('teste.png', cv2.IMREAD_GRAYSCALE)
-depth_image_opencv = cv2.resize(depth_image_opencv, (640,480),  interpolation = cv2.INTER_NEAREST)
-print("depth_image "  + str(depth_image.shape))
-print('depth_image_opencv ' + str(depth_image_opencv.shape))
-cv2.imshow('depth_image_opencv',depth_image_opencv )
-depth_image_smoothed = cv2.GaussianBlur(depth_image_opencv, (5, 5), 0)
-cv2.imshow('depth_image_smoothed', depth_image_smoothed)
-cv2.waitKey(0) 
+depth_image_smoothed = depth_image
+depth_image_smoothed = cv2.GaussianBlur(depth_image, (5, 5), 0)
 
 # Mascarar a imagem de profundidade
-masked_depth = np.where((mask > 0.5) & (depth_image_smoothed <= 355), depth_image_smoothed, 0)  
+masked_depth = np.where((mask > 0.5) & (depth_image_smoothed <= 420), depth_image_smoothed, 0) #420 para os blocos maiores esse número é a medição da câmera até o fundo do objeto
 
 Y, X = np.meshgrid(np.linspace(0, 1, masked_depth.shape[1]), np.linspace(0, 1, masked_depth.shape[0]))
 
 # Extraia os pontos válidos da imagem de profundidade e da máscara
-valid_points = masked_depth[mask > 0]
-valid_Y = Y[mask > 0]
-valid_X = X[mask > 0]
+valid_points = masked_depth[masked_depth > 0]
+valid_Y = Y[masked_depth > 0]
+valid_X = X[masked_depth > 0]
 
 # Visualizando a nuvem de pontos
 fig = plt.figure(figsize=(10, 7))
@@ -63,13 +76,13 @@ ax.set_title('Nuvem de pontos 3D da câmera de profundidade RealSense')
 plt.show()
 
 pipeline.stop()
-cv2.destroyAllWindows() 
+
 # Função para gerar relatório
 def generate_report(mask, masked_depth):
     fig, axs = plt.subplots(2, 1, figsize=(10, 12))
     
     valid_distances = masked_depth[mask > 0.5]
-    mean_distance = 325  # Distância da superfície do objeto à câmera
+    mean_distance = 366  # 370 Medida de distância da câmera até a superfície frontal do objeto (onde começa o objeto)
     std_distance = np.std(valid_distances)
     threshold = mean_distance + 1
     anomaly_mask = np.zeros_like(masked_depth)
@@ -91,10 +104,7 @@ def generate_report(mask, masked_depth):
     max_distance = np.max(valid_distances)
     
     stats_text = f"""
-    Distância Mínima: {min_distance} mm
-    Distância Máxima: {max_distance} mm
-    Distância Média: {mean_distance:.2f} mm
-    Desvio padrão: {std_distance:.2f} mm
+    Distância Máxima dentro da região de desgaste bloco 4: {max_distance} mm
     """
     
     plt.figtext(0.65, 0.3, stats_text, fontsize=10, ha='left')
